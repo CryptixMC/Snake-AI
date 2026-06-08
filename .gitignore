@@ -1,0 +1,11 @@
+# Rust build artifacts
+rust/target/
+
+# Python
+python/__pycache__/
+python/*.pyc
+python/.git/
+
+# Model checkpoints (binary — too large/binary for git)
+*.pt
+*.bin
