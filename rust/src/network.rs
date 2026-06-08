@@ -1,4 +1,5 @@
 // Architecture: 20 → 64 → 4
+// Inputs: 8 wall + 8 body + 4 food directions (up/down/left/right, all >= 0)
 // Flat weight order: W1 | b1 | W2 | b2
 
 use rand_distr::{Distribution, Normal};
@@ -35,7 +36,9 @@ pub fn forward(params: &[f32], x: &[f32]) -> [f32; OUT_SIZE] {
 }
 
 pub fn argmax(logits: &[f32; OUT_SIZE]) -> usize {
-    logits.iter().enumerate()
+    logits
+        .iter()
+        .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
         .map(|(i, _)| i)
         .unwrap_or(0)
@@ -92,10 +95,13 @@ pub fn random_population(n: usize) -> Vec<Vec<f32>> {
     let w2_std = (2.0f32 / (H_SIZE + OUT_SIZE) as f32).sqrt();
     let w1_dist = Normal::new(0.0f32, w1_std).unwrap();
     let w2_dist = Normal::new(0.0f32, w2_std).unwrap();
-    (0..n).map(|_| {
-        let mut p = vec![0f32; PARAM_COUNT];
-        for i in 0..W1_END      { p[i] = w1_dist.sample(&mut rng); }
-        for i in B1_END..W2_END { p[i] = w2_dist.sample(&mut rng); }
-        p
-    }).collect()
+
+    (0..n)
+        .map(|_| {
+            let mut p = vec![0f32; PARAM_COUNT];
+            for i in 0..W1_END        { p[i] = w1_dist.sample(&mut rng); }
+            for i in B1_END..W2_END   { p[i] = w2_dist.sample(&mut rng); }
+            p
+        })
+        .collect()
 }

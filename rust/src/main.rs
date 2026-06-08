@@ -11,6 +11,8 @@ use macroquad::prelude::*;
 use ga::GeneticAlgorithm;
 use visualize::{Visualizer, WIN_W, WIN_H};
 
+// ── CLI ───────────────────────────────────────────────────────────────────────
+
 #[derive(Parser)]
 #[command(name = "snake-ai", about = "Snake neuroevolution — Rust")]
 struct Cli {
@@ -63,6 +65,8 @@ struct WatchArgs {
     grid: i32,
 }
 
+// ── Window config ─────────────────────────────────────────────────────────────
+
 fn window_conf() -> Conf {
     Conf {
         window_title: "Snake AI — Rust".to_owned(),
@@ -72,14 +76,19 @@ fn window_conf() -> Conf {
     }
 }
 
+// ── Entry point ───────────────────────────────────────────────────────────────
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let cli = Cli::parse();
+
     match cli.command {
         Command::Train(args) => run_train(args).await,
         Command::Watch(args) => run_watch(args).await,
     }
 }
+
+// ── Train ────────────────────────────────────────────────────────────────────
 
 async fn run_train(args: TrainArgs) {
     let viz = Visualizer::new(args.grid);
@@ -95,8 +104,14 @@ async fn run_train(args: TrainArgs) {
     };
 
     let mut ga = GeneticAlgorithm::new(
-        args.population, args.grid, 0.1,
-        args.selection_pressure, args.mutation_std, args.mutation_rate, 0.5, gpu,
+        args.population,
+        args.grid,
+        0.1,
+        args.selection_pressure,
+        args.mutation_std,
+        args.mutation_rate,
+        0.5,
+        gpu,
     );
 
     if let Some(path) = &args.resume {
@@ -110,16 +125,18 @@ async fn run_train(args: TrainArgs) {
     }
 
     println!("Snake AI — Rust");
-    println!("Population {}  Grid {}x{}  Generations {}",
-        args.population, args.grid, args.grid, args.generations);
+    println!("Population {}  Grid {}x{}  Generations {}", args.population, args.grid, args.grid, args.generations);
     println!("{}", "-".repeat(72));
 
     let mut best_ever = 0.0f32;
     let mut best_params: Vec<f32> = vec![];
 
     for gen in 1..=args.generations {
+        // Window stays responsive — drain events once per generation
         next_frame().await;
-        if is_key_pressed(KeyCode::Q) || is_key_pressed(KeyCode::Escape) { break; }
+        if is_key_pressed(KeyCode::Q) || is_key_pressed(KeyCode::Escape) {
+            break;
+        }
 
         let t0    = Instant::now();
         let stats = ga.step();
@@ -153,14 +170,19 @@ async fn run_train(args: TrainArgs) {
     }
 }
 
+// ── Watch ────────────────────────────────────────────────────────────────────
+
 async fn run_watch(args: WatchArgs) {
     let params = match load_params(&args.checkpoint) {
         Ok(p)  => p,
         Err(e) => { eprintln!("Cannot load {}: {e}", args.checkpoint); return; }
     };
+
     println!("Watching {}  |  press Q/Esc to quit", args.checkpoint);
+
     let viz = Visualizer::new(args.grid);
     let mut episode = 0usize;
+
     loop {
         episode += 1;
         let score = viz.play_top_n(&[params.clone()], episode, args.fps).await;
@@ -169,16 +191,21 @@ async fn run_watch(args: WatchArgs) {
     }
 }
 
+// ── Checkpoint I/O ────────────────────────────────────────────────────────────
+
 fn save_params(params: &[f32], path: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
-    for v in params { f.write_all(&v.to_le_bytes())?; }
+    for v in params {
+        f.write_all(&v.to_le_bytes())?;
+    }
     Ok(())
 }
 
 fn load_params(path: &str) -> std::io::Result<Vec<f32>> {
     let bytes = std::fs::read(path)?;
-    Ok(bytes.chunks_exact(4)
+    Ok(bytes
+        .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect())
 }

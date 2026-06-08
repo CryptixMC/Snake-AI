@@ -10,15 +10,15 @@ use wgpu::{
 use crate::network::{IN_SIZE, PARAM_COUNT};
 
 pub struct GpuInference {
-    device:       wgpu::Device,
-    queue:        wgpu::Queue,
-    pipeline:     wgpu::ComputePipeline,
-    bind_group:   wgpu::BindGroup,
-    params_buf:   wgpu::Buffer,
-    obs_buf:      wgpu::Buffer,
-    actions_buf:  wgpu::Buffer,
+    device:      wgpu::Device,
+    queue:       wgpu::Queue,
+    pipeline:    wgpu::ComputePipeline,
+    bind_group:  wgpu::BindGroup,
+    params_buf:  wgpu::Buffer,
+    obs_buf:     wgpu::Buffer,
+    actions_buf: wgpu::Buffer,
     readback_buf: wgpu::Buffer,
-    pub n:        usize,
+    pub n:       usize,
 }
 
 impl GpuInference {
@@ -27,24 +27,30 @@ impl GpuInference {
             backends: Backends::VULKAN,
             ..Default::default()
         });
-        let adapter = instance.request_adapter(&RequestAdapterOptions {
-            power_preference: PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }).await?;
+
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await?;
 
         let info = adapter.get_info();
         println!("  wgpu: {} ({:?})", info.name, info.backend);
 
-        let (device, queue) = adapter.request_device(
-            &DeviceDescriptor {
-                label: None,
-                required_features: Features::empty(),
-                required_limits: Limits::default(),
-                memory_hints: Default::default(),
-            },
-            None,
-        ).await.ok()?;
+        let (device, queue) = adapter
+            .request_device(
+                &DeviceDescriptor {
+                    label: None,
+                    required_features: Features::empty(),
+                    required_limits: Limits::default(),
+                    memory_hints: Default::default(),
+                },
+                None,
+            )
+            .await
+            .ok()?;
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: None,
@@ -53,7 +59,11 @@ impl GpuInference {
 
         let bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: None,
-            entries: &[bgl_entry(0, true), bgl_entry(1, true), bgl_entry(2, false)],
+            entries: &[
+                bgl_entry(0, true),
+                bgl_entry(1, true),
+                bgl_entry(2, false),
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -77,18 +87,21 @@ impl GpuInference {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
         let obs_buf = device.create_buffer(&BufferDescriptor {
             label: Some("obs"),
             size: (n * IN_SIZE * 4) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
         let actions_buf = device.create_buffer(&BufferDescriptor {
             label: Some("actions"),
             size: (n * 4) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+
         let readback_buf = device.create_buffer(&BufferDescriptor {
             label: Some("readback"),
             size: (n * 4) as u64,
@@ -106,35 +119,57 @@ impl GpuInference {
             ],
         });
 
-        Some(Self { device, queue, pipeline, bind_group, params_buf, obs_buf, actions_buf, readback_buf, n })
+        Some(Self {
+            device,
+            queue,
+            pipeline,
+            bind_group,
+            params_buf,
+            obs_buf,
+            actions_buf,
+            readback_buf,
+            n,
+        })
     }
 
+    /// Upload all individuals' weights. Call once per generation before the loop.
     pub fn upload_params(&self, params: &[Vec<f32>]) {
         let flat: Vec<f32> = params.iter().flat_map(|p| p.iter().copied()).collect();
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::cast_slice(&flat));
     }
 
+    /// Run one batch inference step. `obs_flat` is N × IN_SIZE contiguous f32s.
+    /// Returns N actions (dead snakes get action 0 — caller ignores them).
     pub fn infer(&self, obs_flat: &[f32]) -> Vec<usize> {
         self.queue.write_buffer(&self.obs_buf, 0, bytemuck::cast_slice(obs_flat));
+
         let mut enc = self.device.create_command_encoder(&CommandEncoderDescriptor::default());
         {
             let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
-                label: None, timestamp_writes: None,
+                label: None,
+                timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.dispatch_workgroups((self.n as u32 + 63) / 64, 1, 1);
         }
-        enc.copy_buffer_to_buffer(&self.actions_buf, 0, &self.readback_buf, 0, (self.n * 4) as u64);
+        enc.copy_buffer_to_buffer(
+            &self.actions_buf, 0,
+            &self.readback_buf, 0,
+            (self.n * 4) as u64,
+        );
         self.queue.submit(std::iter::once(enc.finish()));
 
+        // Synchronous readback
         let slice = self.readback_buf.slice(..);
         slice.map_async(MapMode::Read, |_| {});
         self.device.poll(Maintain::Wait);
 
         let data = slice.get_mapped_range();
         let actions: Vec<usize> = bytemuck::cast_slice::<u8, u32>(&data)
-            .iter().map(|&a| a as usize).collect();
+            .iter()
+            .map(|&a| a as usize)
+            .collect();
         drop(data);
         self.readback_buf.unmap();
         actions

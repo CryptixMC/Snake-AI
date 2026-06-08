@@ -48,6 +48,8 @@ def evaluate_population(
         fr, fc = env.food
         dist_bonus = max_dist - (abs(hr - fr) + abs(hc - fc))
         if env.score > 0:
+            # Step penalty only when food was eaten — dying immediately is never
+            # better than eating food, but spinning between foods is penalised.
             fitness[i] = env.score * 1000 - env.steps * 0.1 + dist_bonus
         else:
             fitness[i] = float(dist_bonus)
@@ -76,6 +78,7 @@ class GeneticAlgorithm:
         self.mutation_rate      = mutation_rate
         self.crossover_rate     = crossover_rate
 
+        # Rank-based selection probabilities — cached, recomputed if N changes
         self._rank_probs: np.ndarray = self._build_rank_probs(population_size, selection_pressure)
 
         self.params   = random_population(population_size, device)
@@ -93,9 +96,11 @@ class GeneticAlgorithm:
 
         new_params = self.params.clone()
 
+        # Elitism — keep top individuals unchanged
         for i, idx in enumerate(ranked[: self.elite_n]):
             new_params[i] = self.params[idx]
 
+        # Reproduce the rest: crossover or asexual, always mutate
         for i in range(self.elite_n, self.N):
             if np.random.rand() < self.crossover_rate:
                 p1 = self.params[self._rank_select(ranked)]
@@ -117,22 +122,32 @@ class GeneticAlgorithm:
 
     @staticmethod
     def _build_rank_probs(n: int, selection_pressure: float) -> np.ndarray:
+        """
+        Linear rank probabilities: best individual is selection_pressure times
+        more likely to be chosen than the worst. rank 0 = best, rank n-1 = worst.
+        """
         weights = np.linspace(selection_pressure, 1.0, n)
         return weights / weights.sum()
 
     def _rank_select(self, ranked: np.ndarray) -> int:
+        """Sample a parent by rank — fitness gaps don't dominate selection."""
         rank_pos = np.random.choice(self.N, p=self._rank_probs)
         return int(ranked[rank_pos])
 
     def _crossover(self, p1: torch.Tensor, p2: torch.Tensor) -> torch.Tensor:
+        """Uniform crossover — each weight independently taken from p1 or p2."""
         mask = torch.rand(PARAM_COUNT, device=self.device) < 0.5
         return torch.where(mask, p1, p2)
 
     def _mutate(self, individual: torch.Tensor):
+        # Small perturbations on a few weights — preserves good structure
         mask_fine = torch.rand(PARAM_COUNT, device=self.device) < self.mutation_rate
         noise_fine = torch.randn(PARAM_COUNT, device=self.device) * self.mutation_std
+
+        # Rare large jumps (2% of weights) for occasional exploration
         mask_large = torch.rand(PARAM_COUNT, device=self.device) < 0.02
         noise_large = torch.randn(PARAM_COUNT, device=self.device) * (self.mutation_std * 5)
+
         individual.add_(mask_fine * noise_fine + mask_large * noise_large)
 
     def top_n_params(self, n: int) -> list:

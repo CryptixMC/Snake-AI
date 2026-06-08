@@ -1,6 +1,7 @@
 import torch
 
 # Architecture: 20 -> 64 -> 4
+# Inputs: 8 wall + 8 body + 4 food directions (up/down/left/right, all >= 0)
 # Flat weight layout per individual:
 #   W1: 20*64=1280  b1: 64  W2: 64*4=256  b2: 4
 #   Total: 1604
@@ -15,6 +16,13 @@ PARAM_COUNT = _W1 + _B1 + _W2 + _B2  # 1604
 
 
 def forward_batch(params: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """
+    Batch forward pass for the entire population.
+
+    params : (N, 372) - each row is one individual's flat weights
+    x      : (N, 18)  - observations for all individuals
+    returns: (N, 4)   - action logits
+    """
     N = params.shape[0]
     i0, i1, i2, i3 = 0, _W1, _W1 + _B1, _W1 + _B1 + _W2
 
@@ -28,6 +36,13 @@ def forward_batch(params: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
 
 
 def forward_with_activations(params: torch.Tensor, x: torch.Tensor) -> dict:
+    """
+    Single-individual forward pass returning all activations and weights.
+
+    params : (372,) - one individual's flat weights
+    x      : (18,)  - one observation
+    returns: dict with numpy arrays ready for rendering
+    """
     import numpy as np
 
     w1 = params[:_W1].view(_IN, _H)
@@ -49,6 +64,7 @@ def forward_with_activations(params: torch.Tensor, x: torch.Tensor) -> dict:
 
 
 def random_population(n: int, device: torch.device) -> torch.Tensor:
+    """Xavier-style initialisation for a fresh population."""
     params = torch.zeros(n, PARAM_COUNT, device=device)
     torch.nn.init.xavier_uniform_(params[:, :_W1].view(n, _IN, _H))
     torch.nn.init.xavier_uniform_(params[:, _W1 + _B1:_W1 + _B1 + _W2].view(n, _H, _OUT))

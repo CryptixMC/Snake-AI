@@ -4,8 +4,11 @@ rust/target/
 # Python
 python/__pycache__/
 python/*.pyc
-python/.git/
 
-# Model checkpoints (binary — too large/binary for git)
+# Model checkpoints (binary)
 *.pt
 *.bin
+
+# IDE / tool directories
+.zed/
+.claude/

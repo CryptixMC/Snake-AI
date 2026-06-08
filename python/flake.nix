@@ -32,15 +32,17 @@
             pkgs.rocmPackages.rocm-runtime
           ];
 
+          # RX 6800 XT is gfx1030 — some ROCm builds need this hint
           env = {
             HSA_OVERRIDE_GFX_VERSION = "10.3.0";
+            # Point ROCm at the eGPU (renderD129 if card0 is iGPU, adjust if needed)
             ROCR_VISIBLE_DEVICES = "0";
           };
 
           shellHook = ''
             echo "Snake AI dev shell — ROCm / RX 6800 XT"
             echo "Checking GPU access..."
-            rocminfo 2>/dev/null | grep -A2 "Agent 2" | head -6 || echo "  rocminfo failed — check render/video groups"
+            rocminfo 2>/dev/null | grep -A2 "Agent 2" | head -6 || echo "  rocminfo failed — check render/video groups (see README note)"
             echo ""
             python3 -c "
 import torch

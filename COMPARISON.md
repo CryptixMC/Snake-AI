@@ -123,26 +123,94 @@ VK_ICD_FILENAMES = "${pkgs.mesa.drivers}/share/vulkan/icd.d/radeon_icd.x86_64.js
 ```
 
 Each inference step requires an explicit round-trip: upload observations → dispatch
-compute shader → copy to staging buffer → `map_async` → poll → read → unmap.
+compute shader → copy to staging buffer → `map_async` → poll → read → unmap:
 
-The synchronous readback (`poll(Maintain::Wait)`) stalls the CPU waiting for GPU output every
-game step. PyTorch's scheduler overlaps these more efficiently.
+```rust
+// gpu.rs — one step of batch inference
+pub fn infer(&self, obs_flat: &[f32]) -> Vec<usize> {
+    self.queue.write_buffer(&self.obs_buf, 0, bytemuck::cast_slice(obs_flat));
+
+    let mut enc = self.device.create_command_encoder(&CommandEncoderDescriptor::default());
+    {
+        let mut pass = enc.begin_compute_pass(&ComputePassDescriptor { .. });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups((self.n as u32 + 63) / 64, 1, 1);
+    }
+    enc.copy_buffer_to_buffer(&self.actions_buf, 0, &self.readback_buf, 0, ..);
+    self.queue.submit(std::iter::once(enc.finish()));
+
+    // Synchronous readback — blocks until GPU is done
+    let slice = self.readback_buf.slice(..);
+    slice.map_async(MapMode::Read, |_| {});
+    self.device.poll(Maintain::Wait);
+    // ... extract and return actions
+}
+```
+
+The synchronous readback (`poll(Maintain::Wait)`) is a meaningful difference: the Rust version
+stalls the CPU waiting for GPU output every game step. PyTorch's scheduler overlaps these
+more efficiently.
 
 **Portability trade-off:** `wgpu` targets Vulkan, Metal, DX12, and WebGPU — the same code
 runs on Apple Silicon, Windows, and the browser. PyTorch ROCm is Linux/AMD-only.
+
+### CPU Fallback
+
+| | Python | Rust |
+|-|--------|------|
+| Mechanism | `device = "cpu"` | `rayon::par_iter()` |
+| Explicit code | No — PyTorch handles it | Yes — separate `evaluate_cpu()` |
+| Parallelism | PyTorch's CPU thread pool | One OS thread per individual |
+
+```rust
+// ga.rs — explicit CPU fallback path
+pub fn step(&mut self) -> Stats {
+    self.fitness = match &self.gpu {
+        Some(g) => Self::evaluate_gpu(g, &self.params, self.grid_size),
+        None    => Self::evaluate_cpu(&self.params, self.grid_size),
+    };
+```
 
 ---
 
 ## 4. Neural Network Definition
 
 The architecture is identical (20→64→4, ReLU hidden, flat weight vector of 1604 f32s).
+The implementations diverge on *how* that math is expressed.
 
 ### Python — PyTorch tensor ops
+
+```python
+# network.py
+def forward_batch(params: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    N = params.shape[0]
+    w1 = params[:, 0:1280].view(N, 20, 64)
+    b1 = params[:, 1280:1344]
+    w2 = params[:, 1344:1600].view(N, 64, 4)
+    b2 = params[:, 1600:]
+
+    h = torch.relu(torch.bmm(x.unsqueeze(1), w1).squeeze(1) + b1)
+    return torch.bmm(h.unsqueeze(1), w2).squeeze(1) + b2
+```
 
 All 500 snakes evaluated simultaneously. `torch.bmm` is a batched matrix multiply dispatched
 to the GPU as a single operation.
 
 ### Rust — manual loops
+
+```rust
+// network.rs
+pub fn forward(params: &[f32], x: &[f32]) -> [f32; OUT_SIZE] {
+    let mut h = [0f32; H_SIZE];
+    for j in 0..H_SIZE {
+        let mut s = b1[j];
+        for i in 0..IN_SIZE { s += x[i] * w1[i * H_SIZE + j]; }
+        h[j] = s.max(0.0);
+    }
+    // ... output layer
+}
+```
 
 One individual at a time on the CPU. Parallelism is via `rayon` (one thread per snake) or
 offloaded entirely to the WGSL shader. **There is no autograd** — this implementation only
@@ -152,8 +220,32 @@ does inference, not gradient-based training.
 
 ## 5. Difficulty Curve
 
+### Python
+
+- **Getting started:** `pip install torch numpy pygame` — minutes
+- **GPU access:** `device = torch.device("cuda")` — one line; ROCm needs an env var
+- **Changing architecture:** Adjust slice indices in `network.py` — 5 lines
+- **Debugging:** `print()` tensors, `torch.profiler`, Jupyter cells
+- **Hidden risks:** Python loops over tensors are slow (the game step loop in `ga.py` is the
+  bottleneck, not the GPU inference); the GIL prevents true thread-level parallelism
+
+### Rust
+
+- **Getting started:** Cargo handles dependencies, but `wgpu` pipeline setup is ~120 lines
+  before you dispatch a single kernel
+- **GPU access:** Write WGSL, manage bind groups, buffer staging, `map_async`, `poll` — all manual
+- **Changing architecture:** Update `PARAM_COUNT`, index constants, and the WGSL shader — 3 files
+- **Debugging:** `dbg!()`, `println!()`, but no equivalent to PyTorch's tensor inspection tools;
+  GPU shader debugging requires external tools (RenderDoc, etc.)
+- **Compile-time safety:** The borrow checker catches data races and buffer overruns before the
+  program runs — this is real value, especially for the GPU buffer casting via `bytemuck`
+- **`async` overhead:** `wgpu` is async-native; `pollster::block_on` is used to drive it
+  synchronously, which adds a layer to understand
+
+### Learning curve summary
+
 ```
-Easy ←—————————————————————————→ Hard
+Easy ←————————————————————————————————→ Hard
 
 Python research prototype:  ████░░░░░░  (familiar ML API, GPU in 1 line)
 Python production tuning:   ██████░░░░  (profiling, avoiding Python overhead)
@@ -167,25 +259,34 @@ Rust + wgpu GPU:            █████████░  (shaders, buffer man
 
 ### Reach for Python when…
 
-- You're **prototyping or doing research**
-- You need **autograd / gradient-based training**
-- You want **ecosystem breadth** — Hugging Face, Gymnasium, Stable-Baselines3, JAX
+- You're **prototyping or doing research** — change topology, loss function, or GA parameters in
+  minutes without touching multiple files
+- You need **autograd / gradient-based training** — PyTorch's backward pass is essential for
+  anything beyond neuroevolution (RL policy gradients, supervised learning, fine-tuning)
+- You want **ecosystem breadth** — Hugging Face, Gymnasium, Stable-Baselines3, JAX, and thousands
+  of pretrained models are Python-first
 - Your GPU is AMD — ROCm support in PyTorch is far more mature than in Rust ML crates
-- You're evolving **large populations** — `torch.bmm` scales without writing GPU code
+- You're evolving **large populations** — `torch.bmm` scales to tens of thousands of individuals
+  without writing a line of GPU code
 
 ### Reach for Rust when…
 
-- You need a **production inference engine** — no Python runtime, predictable latency
+- You need a **production inference engine** — no Python runtime, predictable latency, small binary
 - You're **embedding ML in a native application** — game engine, CLI tool, embedded system
-- You need **cross-platform GPU** — `wgpu` runs on Vulkan, Metal, DX12, and WebGPU
-- The network is **fixed and small** — manual matmul is fine at this scale
-- **Memory and latency are critical**
-- You want **compile-time correctness guarantees**
+- You need **cross-platform GPU** — `wgpu` runs on Vulkan, Metal, DX12, and WebGPU; PyTorch ROCm
+  is Linux-only
+- The network is **fixed and small** — manual matmul is fine at this scale; `candle` or `burn`
+  are worth adding for larger models
+- **Memory and latency are critical** — Rust gives you direct control over allocation and avoids
+  GC pauses or Python interpreter overhead
+- You want **compile-time correctness guarantees** — the borrow checker and type system catch
+  entire classes of bug (buffer overruns, data races) that Python only surfaces at runtime
 
 ### The hybrid pattern
 
-**Prototype and train in Python**, then **export weights and run inference in Rust**.
-Both projects save weights in a flat f32 binary format so this bridge is already half-built.
+A common production workflow: **prototype and train in Python**, then **export weights and run
+inference in Rust**. Both projects save weights in a flat f32 binary format —
+`best_snake.pt` (Python) and `best_snake.bin` (Rust) — so this bridge is already half-built.
 
 ---
 
@@ -201,4 +302,7 @@ Both projects save weights in a flat f32 binary format so this bridge is already
 | Which deploys more portably? | Rust (`wgpu` cross-platform) |
 | Which should you learn first? | Python — the ecosystem will make you more productive immediately |
 
-**Python is where ML research happens; Rust is where ML gets productionized.**
+The honest summary: **Python is where ML research happens; Rust is where ML gets productionized.**
+These two Snake AI projects demonstrate that you can build the same thing in both — but the Rust
+version requires 60% more code, manual GPU programming, and explicit CPU/GPU path selection in
+exchange for portability, predictable performance, and memory safety.

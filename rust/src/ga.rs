@@ -18,6 +18,7 @@ pub struct GeneticAlgorithm {
     pub fitness:         Vec<f32>,
     pub generation:      usize,
     pub ranked_params:   Vec<Vec<f32>>,
+
     pub population_size: usize,
     pub grid_size:       i32,
     elite_n:             usize,
@@ -41,11 +42,12 @@ impl GeneticAlgorithm {
     ) -> Self {
         let elite_n    = ((population_size as f32 * elite_frac) as usize).max(1);
         let rank_probs = build_rank_probs(population_size, selection_pressure);
+
         Self {
-            params: random_population(population_size),
-            fitness: vec![0.0; population_size],
-            generation: 0,
-            ranked_params: vec![],
+            params:             random_population(population_size),
+            fitness:            vec![0.0; population_size],
+            generation:         0,
+            ranked_params:      vec![],
             population_size,
             grid_size,
             elite_n,
@@ -64,17 +66,22 @@ impl GeneticAlgorithm {
         };
         self.generation += 1;
 
+        // Sort indices best → worst
         let mut ranked: Vec<usize> = (0..self.population_size).collect();
         ranked.sort_unstable_by(|&a, &b| {
             self.fitness[b].partial_cmp(&self.fitness[a]).unwrap()
         });
+
         self.ranked_params = ranked.iter().map(|&i| self.params[i].clone()).collect();
 
         let mut new_params = self.params.clone();
+
+        // Elites
         for (slot, &src) in ranked[..self.elite_n].iter().enumerate() {
             new_params[slot] = self.params[src].clone();
         }
 
+        // Offspring
         let mut rng = rand::thread_rng();
         for i in self.elite_n..self.population_size {
             let child = if rng.gen::<f32>() < self.crossover_rate {
@@ -86,6 +93,7 @@ impl GeneticAlgorithm {
             };
             new_params[i] = self.mutate(child, &mut rng);
         }
+
         self.params = new_params;
 
         let best_fitness = self.fitness[ranked[0]];
@@ -100,6 +108,8 @@ impl GeneticAlgorithm {
     pub fn top_n_params(&self, n: usize) -> Vec<Vec<f32>> {
         self.ranked_params[..n.min(self.ranked_params.len())].to_vec()
     }
+
+    // ── Private ──────────────────────────────────────────────────────────────
 
     fn food_seq(grid_size: i32) -> Vec<(i32, i32)> {
         let mut rng = rand::thread_rng();
@@ -117,19 +127,29 @@ impl GeneticAlgorithm {
         }
     }
 
+    /// GPU path: sequential game loop, GPU batch inference each step.
     fn evaluate_gpu(gpu: &GpuInference, params: &[Vec<f32>], grid_size: i32) -> Vec<f32> {
         let n        = params.len();
         let max_dist = ((grid_size - 1) * 2) as f32;
         let food_seq = Self::food_seq(grid_size);
+
         let mut envs: Vec<SnakeEnv> = (0..n)
             .map(|_| SnakeEnv::new(grid_size, food_seq.clone()))
             .collect();
-        let mut obs_flat: Vec<f32> = envs.iter_mut().flat_map(|e| e.reset()).collect();
+
+        // Flat obs buffer: n × IN_SIZE, updated in-place each step.
+        let mut obs_flat: Vec<f32> = envs.iter_mut()
+            .flat_map(|e| e.reset())
+            .collect();
         let mut alive = vec![true; n];
+
         gpu.upload_params(params);
+
         loop {
             if alive.iter().all(|&a| !a) { break; }
+
             let actions = gpu.infer(&obs_flat);
+
             for i in 0..n {
                 if !alive[i] { continue; }
                 let (new_obs, done) = envs[i].step(actions[i]);
@@ -138,12 +158,15 @@ impl GeneticAlgorithm {
                 if done { alive[i] = false; }
             }
         }
+
         envs.iter().map(|e| Self::fitness_of(e, max_dist)).collect()
     }
 
+    /// CPU path: rayon parallel, one thread per individual.
     fn evaluate_cpu(params: &[Vec<f32>], grid_size: i32) -> Vec<f32> {
         let max_dist = ((grid_size - 1) * 2) as f32;
         let food_seq = Self::food_seq(grid_size);
+
         params.par_iter().map(|p| {
             let mut env = SnakeEnv::new(grid_size, food_seq.clone());
             let mut obs = env.reset();
@@ -162,7 +185,9 @@ impl GeneticAlgorithm {
         let mut cum = 0.0f64;
         for (pos, p) in self.rank_probs.iter().enumerate() {
             cum += p;
-            if r < cum { return ranked[pos]; }
+            if r < cum {
+                return ranked[pos];
+            }
         }
         ranked[ranked.len() - 1]
     }
@@ -171,8 +196,13 @@ impl GeneticAlgorithm {
         let fine_dist  = Normal::new(0.0f32, self.mutation_std).unwrap();
         let large_dist = Normal::new(0.0f32, self.mutation_std * 5.0).unwrap();
         for v in p.iter_mut() {
-            if rng.gen::<f32>() < self.mutation_rate { *v += fine_dist.sample(rng); }
-            if rng.gen::<f32>() < 0.02              { *v += large_dist.sample(rng); }
+            if rng.gen::<f32>() < self.mutation_rate {
+                *v += fine_dist.sample(rng);
+            }
+            // Rare large jumps (2%) for occasional exploration
+            if rng.gen::<f32>() < 0.02 {
+                *v += large_dist.sample(rng);
+            }
         }
         p
     }
